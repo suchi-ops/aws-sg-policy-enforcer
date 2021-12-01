@@ -73,16 +73,25 @@ def evaluate_compliance(event, configuration_item, valid_rule_parameters):
     #    tags[tag['key']] = tag['value']
 
     #allowed_ports_raw = tags.get('AllowedPorts', '').replace(' ', '').split(',')
-    allowed_ports_raw = ["80", "443", "22", "3389"]
-    allowed_ports = []
-
-    for port in allowed_ports_raw:
+    allowed_inbound_ports_raw = ["9000", "53", "80", "81", "8080", "8081", "443", "8443","5061", "5269", "1720", "5060", "5062", "15000", "10100", "10101", "20100", "500", "4500", "1604", "1719", "36000", "59999"]
+    allowed_inbound_ports = []
+    allowed_outbound_ports_raw = ["9001", "9008", "9997", "1935", "1936", "53", "80", "81", "8080", "8081", "443", "8443", "5061", "5269", "1720", "5060", "15000", "20999", "25000", "29999", "1604", "123", "500", "4500", "36000", "59999", "3478"]
+    allowed_outbound_ports = []
+    
+    
+    for port in allowed_inbound_ports_raw:
         # Ensure the port is a valid integer by converting and storing as int
         try:
-            allowed_ports.append(int(port))
+            allowed_inbound_ports.append(int(port))
         except ValueError:
             continue
-
+    for port in allowed_outbound_ports_raw:
+        # Ensure the port is a valid integer by converting and storing as int
+        try:
+            allowed_outbound_ports.append(int(port))
+        except ValueError:
+            continue
+            
     security_groups = ec2_client.describe_security_groups(GroupIds=sg_id)
     SecurityGroup = security_groups['SecurityGroups'][0]
 
@@ -103,7 +112,7 @@ def evaluate_compliance(event, configuration_item, valid_rule_parameters):
         if permission.get('FromPort'):
             # We are not worried about accessible IP ranges for ports in the allowed ports list
             # If the port is in the list, move on to the next
-            if permission['FromPort'] in allowed_ports or permission['ToPort'] in allowed_ports:
+            if permission['FromPort'] in allowed_inbound_ports or permission['ToPort'] in allowed_inbound_ports:
                 continue
             for ip in permission['IpRanges']:
                 # 0.0.0.0/0 indicates the port is accessible to the Internet
@@ -135,7 +144,7 @@ def evaluate_compliance(event, configuration_item, valid_rule_parameters):
         if egress_permission.get('FromPort'):
             # We are not worried about accessible IP ranges for ports in the allowed ports list
             # If the port is in the list, move on to the next
-            if egress_permission['FromPort'] in allowed_ports or egress_permission['ToPort'] in allowed_ports:
+            if egress_permission['FromPort'] in allowed_outbound_ports or egress_permission['ToPort'] in allowed_outbound_ports:
                 continue
             for ip in egress_permission['IpRanges']:
                 # 0.0.0.0/0 indicates the port is accessible to the Internet
@@ -161,8 +170,8 @@ def evaluate_compliance(event, configuration_item, valid_rule_parameters):
                         
     print (egress_open_ports)       
     
-    unjustified_open_ports = list(set(open_ports) - set(allowed_ports))
-    unjustified_egress_open_ports = list(set(egress_open_ports) - set(allowed_ports))
+    unjustified_open_ports = list(set(open_ports) - set(allowed_inbound_ports))
+    unjustified_egress_open_ports = list(set(egress_open_ports) - set(allowed_outbound_ports))
     
     if unjustified_open_ports or unjustified_egress_open_ports:
         return build_evaluation_from_config_item(
