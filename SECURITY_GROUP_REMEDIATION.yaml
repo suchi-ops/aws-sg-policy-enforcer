@@ -1,0 +1,196 @@
+description: '# Quarantine Securiy Groups with non compliant public ports without a valid exception'
+schemaVersion: '0.3'
+assumeRole: '{{AutomationAssumeRole}}'
+parameters:
+  AutomationAssumeRole:
+    type: String
+  ResourceId:
+    type: String
+  ConfigRuleName:
+    type: String
+mainSteps:
+  - name: quarantine_security_group
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: python3.6
+      Handler: script_handler
+      Script: |-
+        import boto3
+
+
+        ec2_client = boto3.client('ec2')
+        config_client = boto3.client('config')
+
+
+        def extract_element_from_json(obj, path):
+            '''
+                Extracts an element from a nested dictionary or
+                a list of nested dictionaries along a specified path.
+                If the input is a dictionary, a list is returned.
+                If the input is a list of dictionary, a list of lists is returned.
+                obj - list or dict - input dictionary or list of dictionaries
+                path - list - list of strings that form the path to the desired element
+            '''
+            def extract(obj, path, ind, arr):
+                '''
+                    Extracts an element from a nested dictionary
+                    along a specified path and returns a list.
+                    obj - dict - input dictionary
+                    path - list - list of strings that form the JSON path
+                    ind - int - starting index
+                    arr - list - output list
+                '''
+                key = path[ind]
+                if ind + 1 < len(path):
+                    if isinstance(obj, dict):
+                        if key in obj.keys():
+                            extract(obj.get(key), path, ind + 1, arr)
+                        else:
+                            arr.append(None)
+                    elif isinstance(obj, list):
+                        if not obj:
+                            arr.append(None)
+                        else:
+                            for item in obj:
+                                extract(item, path, ind, arr)
+                    else:
+                        arr.append(None)
+                if ind + 1 == len(path):
+                    if isinstance(obj, list):
+                        if not obj:
+                            arr.append(None)
+                        else:
+                            for item in obj:
+                                arr.append(item.get(key, None))
+                    elif isinstance(obj, dict):
+                        arr.append(obj.get(key, None))
+                    else:
+                        arr.append(None)
+                return arr
+            if isinstance(obj, dict):
+                return extract(obj, path, 0, [])
+            elif isinstance(obj, list):
+                outer_arr = []
+                for item in obj:
+                    outer_arr.append(extract(item, path, 0, []))
+                return outer_arr
+        
+        
+        # Function to convert  
+        def listToString(s): 
+            
+            # initialize an empty string
+            str1 = "" 
+            
+            # traverse in the string  
+            for ele in s: 
+                str1 += ele  
+            
+            # return string  
+            return str1
+        
+        def script_handler(events, context):
+          offending_ingress_ports = []
+          offending_egress_ports = []
+          security_id = events['resourceId']
+          config_rule = events['configRuleName']
+          config_rule_lst = config_rule.split()
+          print (security_id)
+          print (config_rule_lst)
+          evaluations = config_client.get_compliance_details_by_resource (ResourceType='AWS::EC2::SecurityGroup', ResourceId=security_id, ComplianceTypes=['NON_COMPLIANT'])
+          
+          if extract_element_from_json(evaluations, ["EvaluationResults", "EvaluationResultIdentifier", "EvaluationResultQualifier", "ConfigRuleName"]) == config_rule_lst:
+              annotation = extract_element_from_json(evaluations, ["EvaluationResults", "Annotation"])
+              annotation_str = (listToString(annotation))
+              ingress_ports = annotation_str.split('ports ')[1].split(' and')[0].strip('[').strip(']').split(', ')
+              egress_ports = annotation_str.split('ports ')[2].split(' without')[0].strip('[').strip(']').split(', ')
+              for port in ingress_ports:
+                  try:
+                      port = int(port)
+                      offending_ingress_ports.append(port)
+                  except ValueError:
+                      continue
+              for port in egress_ports:
+                  try:
+                      port = int(port)
+                      offending_egress_ports.append(port)
+                  except ValueError:
+                      continue
+          
+          print ('-----------------')
+          print (annotation)
+          print (ingress_ports)
+          print (egress_ports)
+          print (offending_ingress_ports)
+          print (offending_egress_ports)
+          print ('-----------------') 
+          
+          offending_security_groups = []
+          sg_id = security_id.split()
+        
+          security_groups = ec2_client.describe_security_groups(GroupIds=sg_id)
+          SecurityGroup = security_groups['SecurityGroups'][0]
+          permissions_without_exception = []
+          permissions_without_exception_egress = []
+          for permission in SecurityGroup['IpPermissions']:
+              from_port = permission.get('FromPort')
+              to_port = permission.get('ToPort')
+              proto_ingress = permission.get('IpProtocol')
+        
+              for ip in permission['IpRanges']:
+                  if ip['CidrIp'] != '0.0.0.0/0':
+                      continue
+        
+              if from_port in offending_ingress_ports:
+                  permissions_without_exception.append(permission)
+              # If FromPort is missing, it indicates all ports allowed
+              elif not from_port:
+                  if proto_ingress == '-1':
+                     ec2_client.revoke_security_group_ingress(GroupId=security_id,IpProtocol=proto_ingress,CidrIp='0.0.0.0/0')
+              # If FromPort and ToPort are different, it indicates a port range is allowed
+              elif from_port != to_port:
+                  for port in offending_ingress_ports:
+                      # Check if the offending port falls within the port range
+                      if from_port <= port <= to_port:
+                          permissions_without_exception.append(permission)
+        
+              if len(permissions_without_exception) == 0:
+                  continue
+              else:
+                  print ('Ingress remove')
+                  ec2_client.revoke_security_group_ingress(GroupId=security_id,IpProtocol=proto_ingress,CidrIp='0.0.0.0/0',FromPort=from_port,ToPort=to_port)
+              
+          #Below is for Egress SG rule    
+          for permission in SecurityGroup['IpPermissionsEgress']:
+              from_port_egress = permission.get('FromPort')
+              to_port_egress = permission.get('ToPort')
+              proto_egress = permission.get('IpProtocol')
+        
+              for ip in permission['IpRanges']:
+                  if ip['CidrIp'] != '0.0.0.0/0':
+                      continue
+        
+              if from_port_egress in offending_egress_ports:
+                  permissions_without_exception.append(permission)
+              # If FromPort is missing, it indicates all ports allowed
+              elif not from_port_egress:
+                  if proto_egress == '-1':
+                    ec2_client.revoke_security_group_egress(GroupId=security_id,IpPermissions=[{'IpProtocol': proto_egress,'IpRanges': [{'CidrIp': '0.0.0.0/0'}]}])
+              # If FromPort and ToPort are different, it indicates a port range is allowed
+              elif from_port_egress != to_port_egress:
+                  for port in offending_egress_ports:
+                      # Check if the offending port falls within the port range
+                      if from_port_egress <= port <= to_port_egress:
+                          permissions_without_exception.append(permission)
+        
+              if len(permissions_without_exception) == 0:
+                  continue
+              else:
+                  print ('Egress remove')
+                  ec2_client.revoke_security_group_egress(GroupId=security_id,IpPermissions=[{'IpProtocol': proto_egress,'FromPort': from_port_egress,'ToPort': to_port_egress,'IpRanges': [{'CidrIp': '0.0.0.0/0'}]}])
+                         
+              
+             
+      InputPayload:
+        resourceId: '{{ResourceId}}'
+        configRuleName: '{{ConfigRuleName}}'
